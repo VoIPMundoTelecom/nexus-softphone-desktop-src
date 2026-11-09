@@ -1,0 +1,6 @@
+# Nexus: CPACK_PROJECT_CONFIG_FILE (gerado por cmake/install/install.cmake com ENABLE_APP_MSI).
+# O Windows Installer so compara os 3 primeiros campos da versao: so o MSI recebe a versao com o N do -nexus.N
+# (ex.: 6.2.3-nexus.2 -> 6.2.302) para o upgrade entre nexus.1 e nexus.2 acontecer. O NSIS fica como esta.
+if(CPACK_GENERATOR STREQUAL "WIX")
+	set(CPACK_PACKAGE_VERSION "@NEXUS_MSI_VERSION@")
+endif()

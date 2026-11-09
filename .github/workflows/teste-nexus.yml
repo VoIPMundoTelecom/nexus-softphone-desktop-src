@@ -1,0 +1,53 @@
+# Nexus: testes rapidos do codigo proprio que nao dependem do SDK nem dos submodulos (gitlab.linphone.org).
+# Compila so os headers de Linphone/tool (regras puras); model/ e core/ ondafone disparam o teste, mas os .cpp
+# deles precisam do SDK e sao compilados so nos instaladores.
+name: Teste Nexus (provisionamento, modos e conta Ondafone)
+
+on:
+  pull_request:
+    paths:
+      - 'Linphone/tool/NexusProvisioning.hpp'
+      - 'Linphone/tool/Ondafone*.hpp'
+      - 'Linphone/model/ondafone/**'
+      - 'Linphone/core/ondafone/**'
+      - 'tests/nexus/**'
+      - '.github/workflows/teste-nexus.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'Linphone/tool/NexusProvisioning.hpp'
+      - 'Linphone/tool/Ondafone*.hpp'
+      - 'Linphone/model/ondafone/**'
+      - 'Linphone/core/ondafone/**'
+      - 'tests/nexus/**'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  qt-minimo:
+    name: NexusProvisioning, OndafoneModo e OndafoneConta (QtCore, g++)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: false
+      - name: QtCore (apt)
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq qt6-base-dev pkg-config libssl-dev
+      - name: Compilar e rodar
+        run: |
+          g++ -std=c++17 -fPIC -Wall -Wextra -I Linphone tests/nexus/nexus_provisioning_test.cpp \
+            $(pkg-config --cflags --libs Qt6Core) -o nexus_provisioning_test
+          ./nexus_provisioning_test
+      - name: OndafoneLista/OndafoneModo (Ed25519 do OpenSSL no teste)
+        run: |
+          g++ -std=c++17 -fPIC -Wall -Wextra -I Linphone tests/nexus/ondafone_modo_test.cpp \
+            $(pkg-config --cflags --libs Qt6Core libcrypto) -o ondafone_modo_test
+          ./ondafone_modo_test
+      - name: OndafoneConta (conta do app no givm)
+        run: |
+          g++ -std=c++17 -fPIC -Wall -Wextra -I Linphone tests/nexus/ondafone_conta_test.cpp \
+            $(pkg-config --cflags --libs Qt6Core) -o ondafone_conta_test
+          ./ondafone_conta_test

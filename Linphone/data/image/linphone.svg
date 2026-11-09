@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Nexus (Grupo IVM): hexagrama de LogoIvmNexus.tsx. Gerado por nexus/gerar_icones.py -->
+<svg width="100" height="102" viewBox="0 0 100 102" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <path d="M 50.00 5.40 L 89.60 28.20 L 89.60 73.80 L 50.00 96.60 L 10.40 73.80 L 10.40 28.20 Z" fill="none" stroke="#1E2C5C" stroke-width="1.80" stroke-linejoin="round" opacity="0.32"/>
+  <line x1="50.00" y1="51.00" x2="50.00" y2="5.40" stroke="#1E2C5C" stroke-width="3.00" stroke-linecap="round"/>
+  <line x1="50.00" y1="51.00" x2="89.60" y2="28.20" stroke="#1E2C5C" stroke-width="3.00" stroke-linecap="round"/>
+  <line x1="50.00" y1="51.00" x2="89.60" y2="73.80" stroke="#1E2C5C" stroke-width="3.00" stroke-linecap="round"/>
+  <line x1="50.00" y1="51.00" x2="50.00" y2="96.60" stroke="#1E2C5C" stroke-width="3.00" stroke-linecap="round"/>
+  <line x1="50.00" y1="51.00" x2="10.40" y2="73.80" stroke="#1E2C5C" stroke-width="3.00" stroke-linecap="round"/>
+  <line x1="50.00" y1="51.00" x2="10.40" y2="28.20" stroke="#1E2C5C" stroke-width="3.00" stroke-linecap="round"/>
+  <circle cx="50.00" cy="5.40" r="6.00" fill="#1E2C5C"/>
+  <circle cx="89.60" cy="28.20" r="6.00" fill="#E8672A"/>
+  <circle cx="89.60" cy="73.80" r="6.00" fill="#1E2C5C"/>
+  <circle cx="50.00" cy="96.60" r="6.00" fill="#1E2C5C"/>
+  <circle cx="10.40" cy="73.80" r="6.00" fill="#1E2C5C"/>
+  <circle cx="10.40" cy="28.20" r="6.00" fill="#1E2C5C"/>
+  <circle cx="50.00" cy="51.00" r="12.00" fill="#F4F1EB" stroke="#1E2C5C" stroke-width="3.00"/>
+  <circle cx="50.00" cy="51.00" r="6.00" fill="#E8672A"/>
+</svg>

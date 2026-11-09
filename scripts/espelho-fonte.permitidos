@@ -1,0 +1,2 @@
+# Exceções da varredura (regex grep -E sobre "arquivo:linha:conteúdo"). Só conteúdo público do upstream.
+^docker-files/bc-dev-[^:]+:[0-9]+:.*/home/bc([/ ]|$)

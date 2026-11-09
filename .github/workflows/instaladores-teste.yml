@@ -1,0 +1,636 @@
+# P5 fase 3 — instaladores de TESTE do Nexus desktop (fork do Linphone Desktop).
+#
+# - Linux: AppImage x86_64 (ubuntu-22.04, glibc 2.35+).
+# - Windows: instalador NSIS (.exe) x64 + MSI (WiX 3, para GPO/Intune/implantacao em massa). Assinados com signtool (Authenticode SHA-256 + carimbo de tempo) so se
+#   os secrets WINDOWS_CERT_PFX (.pfx em base64) e WINDOWS_CERT_PASSWORD existirem; sem eles sai sem assinatura.
+# - macOS: .dmg por arquitetura (arm64 = Apple Silicon, x86_64 = Intel), cada um no runner nativo.
+#   Assinatura Developer ID + notarizacao + staple so se os secrets APPLE_* existirem; sem eles o .app sai com
+#   assinatura ad-hoc (o Gatekeeper avisa; ver INSTALAR.md).
+# - Assinatura e SEMPRE opcional: sem secrets o job nao falha, so gera o instalador sem assinar. O nome do
+#   arquivo e do artefato termina em "-assinado" ou "-nao-assinado" (Linux: AppImage, sem assinatura).
+# - Tag v*: os 5 instaladores + SHA256SUMS vao para um Release publicado da tag.
+# - GPL: na tag, o job fonte-gpl anexa ao Release (rascunho ate o job release publicar) o fonte da tag exata
+#   (git archive limpo por scripts/espelho-fonte.sh --sem-terceiros); sem ele o release nao publica. Release de
+#   repo privado nao e publico: o espelho publico (nexus-softphone-desktop-src) continua obrigatorio.
+#
+# Linux nao usa segredos. O SDK (linphone-sdk) e compilado a partir do submodulo, porque
+# a Belledonne nao publica SDK pre-compilado com o wrapper C++ (liblinphone++) que o app usa
+# (o zip win64 publico so traz o wrapper C#). Cache agressivo: ccache por SO + Qt.
+name: Instaladores de teste
+
+on:
+  workflow_dispatch:
+    inputs:
+      plataformas:
+        description: 'Quais instaladores gerar'
+        type: choice
+        options: [todas, linux, windows, macos]
+        default: todas
+  push:
+    branches: [main, p5-fase3-desktop]   # main: depois do merge do #1 os instaladores seguem saindo
+    tags: ['v*']                         # tag v* = instaladores + Release (paths-ignore nao vale para tags)
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+
+# Sem cancel-in-progress: um build do SDK leva horas; um push novo nao derruba o anterior.
+
+env:
+  QT_VERSION: '6.10.0'
+  BUILD_TYPE: Release
+  # Opcoes comuns: sem crash handler (crashpad/gn = build pesado e upload para Bugsplat da Belledonne),
+  # sem verificacao de atualizacao (apontaria para linphone.org), sem AV1 (aom/dav1d = meson + horas).
+  # GPL: tag do release para o link "Codigo-fonte" (via env; vazio fora de tag v*)
+  NEXUS_SOURCE_TAG: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || '' }}
+  NEXUS_CMAKE_OPTIONS: >-
+    -DLINPHONESDK_PLATFORM=Desktop
+    -DENABLE_APP_PACKAGING=YES
+    -DENABLE_CRASH_HANDLER=NO
+    -DENABLE_UPDATE_CHECK=NO
+    -DENABLE_AV1=NO
+    -DENABLE_DOC=NO
+    -DENABLE_UNIT_TESTS=NO
+    -DENABLE_TESTS=NO
+    -DENABLE_TESTS_COMPONENTS=NO
+
+jobs:
+  linux-appimage:
+    name: Linux (AppImage)
+    if: github.event_name != 'workflow_dispatch' || inputs.plataformas == 'todas' || inputs.plataformas == 'linux'
+    runs-on: ubuntu-22.04
+    timeout-minutes: 360
+    steps:
+      - name: Liberar disco do runner
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL || true
+          df -h /
+
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # git describe -> versao do app
+
+      - name: Chave do cache dos submodulos (commits fixados)
+        id: subkey
+        shell: bash
+        run: |
+          # Commits dos submodulos de 1o nivel; os aninhados (externos do linphone-sdk) seguem o do linphone-sdk.
+          echo "key=submodulos-v1-${{ runner.os }}-$(git ls-tree -r HEAD external | awk '$2=="commit"{print $3, $4}' | git hash-object --stdin | cut -c1-16)" >> "$GITHUB_OUTPUT"
+
+      - name: Cache dos submodulos (gitlab.linphone.org pode estar fora)
+        id: subcache
+        uses: actions/cache/restore@v4
+        with:
+          # Repositorios git dos submodulos (.git/modules). Um por SO: o config de cada um guarda
+          # core.filemode/core.symlinks do SO que clonou.
+          path: .git/modules
+          key: ${{ steps.subkey.outputs.key }}
+
+      - name: Submodulos (espelho privado VoIPMundoTelecom/lp-*; o gitlab.linphone.org bloqueia IP de datacenter)
+        shell: bash
+        env:
+          # token so de leitura nos repos lp-* (scripts/ci-submodulos.sh)
+          LP_MIRROR_TOKEN: ${{ secrets.LP_MIRROR_TOKEN }}
+        # com o cache de .git/modules acima o update nao vai a rede
+        run: bash scripts/ci-submodulos.sh
+
+      - name: Salvar cache dos submodulos
+        if: steps.subcache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: .git/modules
+          key: ${{ steps.subkey.outputs.key }}
+
+      - name: Dependencias de sistema
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            ninja-build ccache yasm nasm doxygen graphviz python3-pip python3-pystache python3-six \
+            python3-jsonschema python3-jinja2 meson perl patch intltool libtool autoconf bison \
+            libasound2-dev libpulse-dev libv4l-dev libglew-dev libegl1-mesa-dev libgl1-mesa-dev \
+            libxv-dev libxinerama-dev libx11-dev libxext-dev libxfixes-dev libxi-dev libxrender-dev \
+            libxkbcommon-dev libxkbcommon-x11-dev libfontconfig1-dev libfreetype6-dev libdbus-1-dev \
+            libxcb1-dev libx11-xcb-dev libxcb-cursor0 libxcb-keysyms1-dev libxcb-image0-dev libxcb-shm0-dev \
+            libxcb-icccm4-dev libxcb-sync-dev libxcb-xfixes0-dev libxcb-shape0-dev libxcb-randr0-dev \
+            libxcb-render-util0-dev libxcb-xinerama0-dev libxcb-xkb-dev libxcb-glx0-dev \
+            libssl-dev libcurl4-openssl-dev libsecret-1-dev libudev-dev libusb-1.0-0-dev file desktop-file-utils fuse libfuse2
+
+      - uses: actions/setup-python@v5
+        id: py
+        with:
+          python-version: '3.12'
+
+      - name: Python (pystache, six)
+        run: python -m pip install pystache six
+
+      - name: Qt ${{ env.QT_VERSION }}
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: ${{ env.QT_VERSION }}
+          host: linux
+          target: desktop
+          arch: linux_gcc_64
+          modules: 'qtnetworkauth qtshadertools qt5compat qtquick3d qtmultimedia'
+          cache: true
+
+      - name: ccache
+        uses: hendrikmuhs/ccache-action@v1.2
+        with:
+          key: linux-${{ hashFiles('.gitmodules') }}-${{ github.sha }}
+          restore-keys: |
+            linux-${{ hashFiles('.gitmodules') }}-
+            linux-
+          max-size: 3G
+
+      - name: Configurar (cmake)
+        run: |
+          cmake -S . -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=$BUILD_TYPE \
+            -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
+            -DCMAKE_BUILD_PARALLEL_LEVEL=4 \
+            -DPython3_EXECUTABLE="${{ steps.py.outputs.python-path }}" \
+            -DNEXUS_SOURCE_TAG="$NEXUS_SOURCE_TAG" \
+            $NEXUS_CMAKE_OPTIONS
+
+      - name: Compilar + empacotar (SDK + app + AppImage)
+        env:
+          APPIMAGE_EXTRACT_AND_RUN: '1'
+        run: cmake --build build --target install --parallel 4
+
+      - name: "Teste: --fetch-config nao deixa o token no log"
+        run: tests/nexus/fetch-config-sem-token-no-log.sh "$(ls build/OUTPUT/Packages/*.AppImage | head -1)" 45
+
+      - name: Listar saida
+        if: always()
+        run: |
+          ls -la build/OUTPUT/Packages || true
+          ccache -s || true
+          df -h /
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Nexus-linux-x86_64-AppImage
+          path: build/OUTPUT/Packages/*.AppImage
+          if-no-files-found: error
+          retention-days: 14
+
+  windows-instalador:
+    name: Windows (instalador .exe + .msi)
+    if: github.event_name != 'workflow_dispatch' || inputs.plataformas == 'todas' || inputs.plataformas == 'windows'
+    runs-on: windows-2022
+    timeout-minutes: 360
+    env:
+      # Secrets opcionais. Vazios = instalador sem assinatura (SmartScreen avisa). Ver INSTALAR.md.
+      WINDOWS_CERT_PFX: ${{ secrets.WINDOWS_CERT_PFX }}                   # .pfx (certificado + chave) em base64
+      WINDOWS_CERT_PASSWORD: ${{ secrets.WINDOWS_CERT_PASSWORD }}
+      WINDOWS_TIMESTAMP_URL: http://timestamp.digicert.com                # RFC 3161
+    steps:
+      - name: Caminhos longos (git e Windows)
+        run: |
+          git config --system core.longpaths true
+          New-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\FileSystem" -Name LongPathsEnabled -Value 1 -PropertyType DWORD -Force
+
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Chave do cache dos submodulos (commits fixados)
+        id: subkey
+        shell: bash
+        run: |
+          # Commits dos submodulos de 1o nivel; os aninhados (externos do linphone-sdk) seguem o do linphone-sdk.
+          echo "key=submodulos-v1-${{ runner.os }}-$(git ls-tree -r HEAD external | awk '$2=="commit"{print $3, $4}' | git hash-object --stdin | cut -c1-16)" >> "$GITHUB_OUTPUT"
+
+      - name: Cache dos submodulos (gitlab.linphone.org pode estar fora)
+        id: subcache
+        uses: actions/cache/restore@v4
+        with:
+          # Repositorios git dos submodulos (.git/modules). Um por SO: o config de cada um guarda
+          # core.filemode/core.symlinks do SO que clonou.
+          path: .git/modules
+          key: ${{ steps.subkey.outputs.key }}
+
+      - name: Submodulos (espelho privado VoIPMundoTelecom/lp-*; o gitlab.linphone.org bloqueia IP de datacenter)
+        shell: bash
+        env:
+          # token so de leitura nos repos lp-* (scripts/ci-submodulos.sh)
+          LP_MIRROR_TOKEN: ${{ secrets.LP_MIRROR_TOKEN }}
+        # com o cache de .git/modules acima o update nao vai a rede
+        run: bash scripts/ci-submodulos.sh
+
+      - name: Salvar cache dos submodulos
+        if: steps.subcache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: .git/modules
+          key: ${{ steps.subkey.outputs.key }}
+
+      - name: Ferramentas MSYS2 (yasm, nasm, make...; NSIS e Perl ja vem no runner)
+        shell: pwsh
+        run: |
+          for ($i=1; $i -le 3; $i++) { C:\msys64\usr\bin\bash.exe -lc "pacman -Sy --noconfirm --needed yasm mingw-w64-x86_64-nasm gawk bzip2 sed intltool make diffutils patch"; if ($LASTEXITCODE -eq 0) { break } }
+          if ($LASTEXITCODE -ne 0) { throw "pacman falhou" }
+          # [16/10] o MSYS2 tirou mingw-w64-x86_64-yasm do repo mingw64 ("target not found"): o yasm agora vem do
+          # repo msys (/usr/bin, já no PATH do build). Confere que existe antes de gastar horas no SDK.
+          C:\msys64\usr\bin\bash.exe -lc "yasm --version | head -1"
+          if ($LASTEXITCODE -ne 0) { throw "yasm ausente" }
+
+      - uses: actions/setup-python@v5
+        id: py
+        with:
+          python-version: '3.12'
+
+      - name: Python (pystache, six)
+        run: python -m pip install pystache six
+
+      - name: WiX 3 (MSI pelo CPack)
+        shell: pwsh
+        run: |
+          # O windows-2022 traz o WiX 3.14 (env WIX); se a imagem deixar de trazer, instala pelo Chocolatey.
+          if (-not ($env:WIX -and (Test-Path (Join-Path $env:WIX 'bin\candle.exe')))) {
+            choco install wixtoolset --version 3.14.1 -y --no-progress
+            $wix = Get-ChildItem 'C:\Program Files (x86)\WiX Toolset v3.*' | Sort-Object Name | Select-Object -Last 1 -ExpandProperty FullName
+            "WIX=$wix\" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+            $env:WIX = "$wix\"
+          }
+          if (-not (Test-Path (Join-Path $env:WIX 'bin\candle.exe'))) { throw "WiX 3 ausente" }
+          & (Join-Path $env:WIX 'bin\candle.exe') -? | Select-Object -First 1
+
+      - name: Doxygen 1.9.8 (o 1.18 do MSYS2 aborta com std::system_error no Doxyfile do liblinphone)
+        run: |
+          Invoke-WebRequest -Uri https://github.com/doxygen/doxygen/releases/download/Release_1_9_8/doxygen-1.9.8.windows.x64.bin.zip -OutFile $env:RUNNER_TEMP\doxygen.zip
+          Expand-Archive $env:RUNNER_TEMP\doxygen.zip -DestinationPath C:\doxygen
+          C:\doxygen\doxygen.exe --version
+
+      - name: Qt ${{ env.QT_VERSION }}
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: ${{ env.QT_VERSION }}
+          host: windows
+          target: desktop
+          arch: win64_msvc2022_64
+          modules: 'qtnetworkauth qtshadertools qt5compat qtquick3d qtmultimedia'
+          cache: true
+
+      - uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: ccache
+        uses: hendrikmuhs/ccache-action@v1.2
+        with:
+          key: windows-${{ hashFiles('.gitmodules') }}-${{ github.sha }}
+          restore-keys: |
+            windows-${{ hashFiles('.gitmodules') }}-
+            windows-
+          max-size: 3G
+          variant: ccache
+
+      - name: Configurar, compilar e empacotar
+        shell: pwsh
+        run: |
+          # Diretorio de build curto (D:\b, mesmo drive do fonte: o openh264 usa caminho relativo): o doxygen do wrapper C++ gera arquivos com nomes de ~170
+          # caracteres e estoura o MAX_PATH (260) dentro de D:\a\<repo>\<repo>\build\...
+          # Ordem do PATH: binarios do MSVC (cl/link) primeiro, depois MSYS2 (sh/bash/make dos
+          # ExternalProject, como o libvpx) ANTES do System32 (cujo bash.exe e o do WSL), depois o resto.
+          $msvc = Split-Path (Get-Command cl.exe).Source
+          $env:PATH = "$msvc;C:\doxygen;C:\msys64\mingw64\bin;C:\msys64\usr\bin;$env:PATH;C:\msys64"
+          where.exe cl link sh bash doxygen nasm yasm makensis perl python
+          $opts = $env:NEXUS_CMAKE_OPTIONS -split '\s+' | Where-Object { $_ }
+          cmake -S . -B D:\b -G Ninja `
+            "-DCMAKE_BUILD_TYPE=$env:BUILD_TYPE" `
+            -DCMAKE_C_COMPILER=cl -DCMAKE_CXX_COMPILER=cl -DCMAKE_RC_COMPILER=rc `
+            -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache `
+            -DCMAKE_BUILD_PARALLEL_LEVEL=4 `
+            "-DPython3_EXECUTABLE=${{ steps.py.outputs.python-path }}" `
+            -DDOXYGEN_EXECUTABLE=C:/doxygen/doxygen.exe -DLINPHONESDK_DOXYGEN_PROGRAM=C:/doxygen/doxygen.exe `
+            -DENABLE_APP_MSI=YES `
+            "-DNEXUS_SOURCE_TAG=$env:NEXUS_SOURCE_TAG" `
+            @opts
+          if ($LASTEXITCODE -ne 0) { throw "configure falhou" }
+          cmake --build D:\b --target install --parallel 4
+          if ($LASTEXITCODE -ne 0) { throw "build falhou" }
+
+      - name: Assinar instaladores .exe e .msi (so com secrets WINDOWS_CERT_*)
+        id: winsign
+        if: env.WINDOWS_CERT_PFX != '' && env.WINDOWS_CERT_PASSWORD != ''
+        shell: pwsh
+        run: |
+          $pfx = Join-Path $env:RUNNER_TEMP 'nexus.pfx'
+          [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:WINDOWS_CERT_PFX))
+          $signtool = (Get-Command signtool.exe -ErrorAction SilentlyContinue).Source
+          if (-not $signtool) {
+            $signtool = Get-ChildItem 'C:\Program Files (x86)\Windows Kits\10\bin\*\x64\signtool.exe' |
+              Sort-Object FullName | Select-Object -Last 1 -ExpandProperty FullName
+          }
+          $pacotes = @(Get-ChildItem D:\b\OUTPUT\Packages\* -Include *.exe, *.msi | Select-Object -ExpandProperty FullName)
+          if ($pacotes.Count -ne 2) { throw "esperava 1 .exe + 1 .msi, veio: $pacotes" }
+          # Senha vem do env (o GitHub mascara secrets no log); o .pfx e apagado no fim mesmo se falhar.
+          try {
+            foreach ($pacote in $pacotes) {
+              & $signtool sign /f $pfx /p $env:WINDOWS_CERT_PASSWORD /fd SHA256 /tr $env:WINDOWS_TIMESTAMP_URL /td SHA256 /d Nexus $pacote
+              if ($LASTEXITCODE -ne 0) { throw "signtool sign falhou: $pacote" }
+              & $signtool verify /pa /v $pacote | Select-Object -First 15
+              if ($LASTEXITCODE -ne 0) { throw "signtool verify falhou: $pacote" }
+            }
+          } finally { Remove-Item -Force $pfx -ErrorAction SilentlyContinue }
+
+      - name: Renomear instaladores (assinado / nao-assinado)
+        id: winname
+        shell: bash
+        run: |
+          if [ "${{ steps.winsign.outcome }}" = success ]; then st=assinado; else st=nao-assinado; fi
+          for ext in exe msi; do
+            src=$(ls /d/b/OUTPUT/Packages/*.$ext | head -1)
+            [ -n "$src" ] || { echo "::error::instalador .$ext nao gerado"; exit 1; }
+            mv "$src" "${src%.$ext}-$st.$ext"
+          done
+          echo "status=$st" >> "$GITHUB_OUTPUT"
+
+      - name: Listar saida
+        if: always()
+        shell: bash
+        run: |
+          ls -la /d/b/OUTPUT/Packages || true
+          ccache -s || true
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Nexus-windows-x64-instalador-${{ steps.winname.outputs.status }}
+          path: |
+            D:/b/OUTPUT/Packages/*.exe
+            D:/b/OUTPUT/Packages/*.msi
+          if-no-files-found: error
+          retention-days: 14
+
+  macos-dmg:
+    name: macOS ${{ matrix.arch }} (.dmg)
+    if: github.event_name != 'workflow_dispatch' || inputs.plataformas == 'todas' || inputs.plataformas == 'macos'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: arm64          # Apple Silicon (M1+)
+            runner: macos-latest
+          - arch: x86_64         # Intel
+            runner: macos-15-intel
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 360
+    env:
+      # Secrets opcionais. Vazios = build nao assinado (ad-hoc). Ver INSTALAR.md / docs/NEXUS-DESKTOP.md.
+      APPLE_CERTIFICATE_P12: ${{ secrets.APPLE_CERTIFICATE_P12 }}         # .p12 "Developer ID Application" em base64
+      APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+      APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}       # opcional: sem ele usa o "Developer ID Application" do .p12
+      APPLE_ID: ${{ secrets.APPLE_ID }}                                   # notarizacao (notarytool)
+      APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+      APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}               # senha de app do appleid.apple.com
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Chave do cache dos submodulos (commits fixados)
+        id: subkey
+        shell: bash
+        run: |
+          # Commits dos submodulos de 1o nivel; os aninhados (externos do linphone-sdk) seguem o do linphone-sdk.
+          echo "key=submodulos-v1-${{ runner.os }}-$(git ls-tree -r HEAD external | awk '$2=="commit"{print $3, $4}' | git hash-object --stdin | cut -c1-16)" >> "$GITHUB_OUTPUT"
+
+      - name: Cache dos submodulos (gitlab.linphone.org pode estar fora)
+        id: subcache
+        uses: actions/cache/restore@v4
+        with:
+          # Repositorios git dos submodulos (.git/modules). Um por SO: o config de cada um guarda
+          # core.filemode/core.symlinks do SO que clonou.
+          path: .git/modules
+          key: ${{ steps.subkey.outputs.key }}
+
+      - name: Submodulos (espelho privado VoIPMundoTelecom/lp-*; o gitlab.linphone.org bloqueia IP de datacenter)
+        shell: bash
+        env:
+          # token so de leitura nos repos lp-* (scripts/ci-submodulos.sh)
+          LP_MIRROR_TOKEN: ${{ secrets.LP_MIRROR_TOKEN }}
+        # com o cache de .git/modules acima o update nao vai a rede
+        run: bash scripts/ci-submodulos.sh
+
+      - name: Salvar cache dos submodulos
+        if: steps.subcache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: .git/modules
+          key: ${{ steps.subkey.outputs.key }}
+
+      - name: Dependencias (Homebrew)
+        run: |
+          brew install ninja ccache yasm nasm doxygen pkg-config || brew install ninja ccache yasm nasm doxygen pkg-config
+          xcodebuild -version
+          sysctl -n hw.ncpu
+          # O linphone-sdk linka o openh264 (make) com o hack "-L/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk/usr/lib"
+          # (cmake/ExternalDependencies.cmake) e sem -isysroot no link. Na imagem macos-26-arm64 20261013 esse
+          # MacOSX.sdk das CLT aponta para o MacOSX27.0 (tbd com arm64e.x1) e o ld do Xcode 26.6 recusa:
+          # "tapi error: unknown architecture". Aponta o MacOSX.sdk das CLT para o SDK do Xcode selecionado.
+          sdk="$(xcrun --sdk macosx --show-sdk-path)"; clt=/Library/Developer/CommandLineTools/SDKs
+          ls -la "$clt" 2>/dev/null || true
+          if [ -d "$clt" ] && [ "$(readlink -f "$clt/MacOSX.sdk")" != "$(readlink -f "$sdk")" ]; then
+            if [ -e "$clt/MacOSX.sdk" ] && [ ! -L "$clt/MacOSX.sdk" ]; then sudo mv "$clt/MacOSX.sdk" "$clt/MacOSX.sdk.orig"; fi
+            sudo ln -sfn "$sdk" "$clt/MacOSX.sdk"
+          fi
+          echo "SDK do Xcode: $sdk"; ls -la "$clt/MacOSX.sdk" 2>/dev/null || true
+
+      - uses: actions/setup-python@v5
+        id: py
+        with:
+          python-version: '3.12'
+
+      - name: Python (pystache, six)
+        run: python -m pip install pystache six
+
+      - name: Qt ${{ env.QT_VERSION }}
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: ${{ env.QT_VERSION }}
+          host: mac
+          target: desktop
+          arch: clang_64
+          modules: 'qtnetworkauth qtshadertools qt5compat qtquick3d qtmultimedia'
+          cache: true
+
+      - name: ccache
+        uses: hendrikmuhs/ccache-action@v1.2
+        with:
+          key: macos-${{ matrix.arch }}-${{ hashFiles('.gitmodules') }}-${{ github.sha }}
+          restore-keys: |
+            macos-${{ matrix.arch }}-${{ hashFiles('.gitmodules') }}-
+            macos-${{ matrix.arch }}-
+          max-size: 3G
+
+      - name: Certificado Apple (so com secrets)
+        id: cert
+        if: env.APPLE_CERTIFICATE_P12 != '' && env.APPLE_CERTIFICATE_PASSWORD != ''
+        run: |
+          KC="$RUNNER_TEMP/nexus.keychain-db"; KCPASS="$(uuidgen)"
+          echo "$APPLE_CERTIFICATE_P12" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+          security create-keychain -p "$KCPASS" "$KC"
+          security set-keychain-settings -lut 21600 "$KC"
+          security unlock-keychain -p "$KCPASS" "$KC"
+          security import "$RUNNER_TEMP/cert.p12" -P "$APPLE_CERTIFICATE_PASSWORD" -A -t cert -f pkcs12 -k "$KC"
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KCPASS" "$KC"
+          security list-keychains -d user -s "$KC" $(security list-keychains -d user | tr -d '"')
+          rm -f "$RUNNER_TEMP/cert.p12"
+          id="$APPLE_SIGNING_IDENTITY"
+          if [ -z "$id" ]; then
+            id=$(security find-identity -v -p codesigning "$KC" | sed -n 's/.*"\(Developer ID Application:[^"]*\)".*/\1/p' | head -1)
+          fi
+          [ -n "$id" ] || { echo "::error::nenhuma identidade 'Developer ID Application' no .p12"; exit 1; }
+          echo "identity=$id" >> "$GITHUB_OUTPUT"
+
+      - name: Configurar (cmake)
+        run: |
+          # Um .app por arquitetura (LINPHONEAPP_MACOS_ARCHS=<arch>), no runner nativo: universal num runner so
+          # compilaria o SDK duas vezes em serie. O TasksMacos.cmake roda o sub-build da arquitetura e o
+          # GenerateAppMacos.cmake monta o Nexus.app (codesign ad-hoc ou Developer ID) e o .dmg (CPack DragNDrop).
+          cmake -S . -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=$BUILD_TYPE \
+            -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
+            -DCMAKE_BUILD_PARALLEL_LEVEL=$(sysctl -n hw.ncpu) \
+            -DPython3_EXECUTABLE="${{ steps.py.outputs.python-path }}" \
+            -DLINPHONEAPP_MACOS_ARCHS=${{ matrix.arch }} \
+            -DLINPHONE_BUILDER_SIGNING_IDENTITY="${{ steps.cert.outputs.identity }}" \
+            -DNEXUS_SOURCE_TAG="$NEXUS_SOURCE_TAG" \
+            $NEXUS_CMAKE_OPTIONS
+
+      - name: Compilar + empacotar (SDK + app + .dmg)
+        run: cmake --build build --target install --parallel $(sysctl -n hw.ncpu)
+
+      - name: Renomear .dmg com a arquitetura
+        id: dmg
+        run: |
+          ls -la build/OUTPUT/macos/Packages || true
+          src=$(ls build/OUTPUT/macos/Packages/*.dmg | head -1)
+          dst="${src%-mac.dmg}-mac-${{ matrix.arch }}.dmg"
+          mv "$src" "$dst"
+          echo "path=$dst" >> "$GITHUB_OUTPUT"
+          lipo -archs build/OUTPUT/macos/Nexus.app/Contents/MacOS/nexus || true
+          codesign -dv build/OUTPUT/macos/Nexus.app 2>&1 | head -5 || true
+
+      - name: Notarizar e grampear (so com secrets)
+        id: notariza
+        if: steps.cert.outcome == 'success' && env.APPLE_ID != '' && env.APPLE_TEAM_ID != '' && env.APPLE_APP_PASSWORD != ''
+        run: |
+          xcrun notarytool submit "${{ steps.dmg.outputs.path }}" --apple-id "$APPLE_ID" --team-id "$APPLE_TEAM_ID" \
+            --password "$APPLE_APP_PASSWORD" --wait --timeout 1h
+          xcrun stapler staple "${{ steps.dmg.outputs.path }}"
+          spctl -a -t open --context context:primary-signature -v "${{ steps.dmg.outputs.path }}" || true
+
+      - name: Rotular .dmg (assinado / nao-assinado)
+        id: macname
+        run: |
+          # "assinado" = Developer ID + notarizado + grampeado (abre sem aviso). So Developer ID sem notarizacao
+          # o Gatekeeper ainda bloqueia, entao conta como nao-assinado.
+          if [ "${{ steps.notariza.outcome }}" = success ]; then st=assinado; else st=nao-assinado; fi
+          src="${{ steps.dmg.outputs.path }}"
+          mv "$src" "${src%.dmg}-$st.dmg"
+          echo "status=$st" >> "$GITHUB_OUTPUT"
+
+      - name: Listar saida
+        if: always()
+        run: |
+          ls -la build/OUTPUT/macos/Packages || true
+          ccache -s || true
+          df -h / || true
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Nexus-macos-${{ matrix.arch }}-dmg-${{ steps.macname.outputs.status }}
+          path: build/OUTPUT/macos/Packages/*.dmg
+          if-no-files-found: error
+          retention-days: 14
+
+  fonte-gpl:
+    name: Fonte GPL da tag
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # a tag e o commit dela (git archive); sem submodulos
+          persist-credentials: false   # o token de escrita so vai para o gh release (GH_TOKEN)
+
+      - name: gitleaks (obrigatorio fora do --teste)
+        env:
+          # sha256 de gitleaks_8.30.1_linux_x64.tar.gz (gitleaks_8.30.1_checksums.txt do release)
+          GITLEAKS_SHA256: 551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb
+        run: |
+          curl -sSfL -o "$RUNNER_TEMP/gitleaks.tar.gz" \
+            https://github.com/gitleaks/gitleaks/releases/download/v8.30.1/gitleaks_8.30.1_linux_x64.tar.gz
+          echo "$GITLEAKS_SHA256  $RUNNER_TEMP/gitleaks.tar.gz" | sha256sum -c -
+          sudo tar -xzf "$RUNNER_TEMP/gitleaks.tar.gz" -C /usr/local/bin gitleaks
+
+      - name: Fonte da tag (sem arquivos internos)
+        run: scripts/espelho-fonte.sh --sem-terceiros "$GITHUB_REF_NAME" "$RUNNER_TEMP/espelho"
+
+      - name: Anexar o fonte ao Release da tag (rascunho; o job release publica)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          d="$RUNNER_TEMP/espelho/$GITHUB_REF_NAME"
+          cp "$d/SHA256SUMS" "$RUNNER_TEMP/SHA256SUMS-fonte.txt"
+          if gh release view "$GITHUB_REF_NAME" -R "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" "$d"/*.tar.gz "$RUNNER_TEMP/SHA256SUMS-fonte.txt" \
+              -R "$GITHUB_REPOSITORY" --clobber
+          else
+            gh release create "$GITHUB_REF_NAME" "$d"/*.tar.gz "$RUNNER_TEMP/SHA256SUMS-fonte.txt" \
+              -R "$GITHUB_REPOSITORY" --verify-tag --draft --title "Nexus desktop $GITHUB_REF_NAME" \
+              --notes "Instaladores gerados pelo run ${{ github.run_id }}. Confira com \`sha256sum -c SHA256SUMS\`. Veja INSTALAR.md."
+          fi
+          {
+            echo "### Fonte GPL da tag"
+            echo "Anexado ao Release: \`nexus-softphone-desktop-src-$GITHUB_REF_NAME.tar.gz\` (SHA-256 em \`SHA256SUMS-fonte.txt\`)."
+            echo "Antes de distribuir: fonte dos submodulos e da Qt (--com-submodulos --qt-fonte) e espelho publico (docs/release-gpl.md)."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  release:
+    name: Release (tag v*)
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [fonte-gpl, linux-appimage, windows-instalador, macos-dmg]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: pacotes
+          merge-multiple: true
+      - name: SHA256SUMS
+        run: |
+          cd pacotes
+          ls -la
+          n=$(ls | wc -l)
+          [ "$n" -eq 5 ] || { echo "::error::esperava 5 instaladores (AppImage, .exe, .msi, 2 .dmg), veio $n"; exit 1; }
+          sha256sum * > SHA256SUMS
+          cat SHA256SUMS
+      # GPL (docs/release-gpl.md): nada e distribuido antes do espelho publico do fonte desta tag existir.
+      - name: Espelho publico do fonte desta tag publicado?
+        run: |
+          url="https://github.com/VoIPMundoTelecom/nexus-softphone-desktop-src/tree/$GITHUB_REF_NAME"
+          code="$(curl -s -o /dev/null -w '%{http_code}' "$url")"
+          if [ "$code" != 200 ]; then
+            echo "::error::Espelho do fonte da tag $GITHUB_REF_NAME nao publicado ($url -> $code). Rode scripts/espelho-fonte.sh $GITHUB_REF_NAME, publique e rode este job de novo."
+            exit 1
+          fi
+          echo "Espelho OK: $url"
+      - name: Publicar Release da tag com os instaladores + SHA256SUMS
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view "$GITHUB_REF_NAME" -R "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            # Re-run da mesma tag: substitui os arquivos e publica (se estava em rascunho)
+            gh release upload "$GITHUB_REF_NAME" pacotes/* -R "$GITHUB_REPOSITORY" --clobber
+            gh release edit "$GITHUB_REF_NAME" -R "$GITHUB_REPOSITORY" --draft=false --latest
+          else
+            gh release create "$GITHUB_REF_NAME" pacotes/* -R "$GITHUB_REPOSITORY" --verify-tag --latest \
+              --title "Nexus desktop $GITHUB_REF_NAME" \
+              --notes "Instaladores gerados pelo run ${{ github.run_id }}. Confira com \`sha256sum -c SHA256SUMS\`. Veja INSTALAR.md."
+          fi

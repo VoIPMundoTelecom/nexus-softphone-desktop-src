@@ -1,0 +1,365 @@
+# Nexus desktop: instaladores de TESTE sobre o linphone-sdk PRE-COMPILADO (sem gitlab.linphone.org).
+#
+# O instaladores-teste.yml compila o SDK a partir dos submodulos, e 25 deles so existem no gitlab.linphone.org
+# (bloqueia IP de datacenter; espelho lp-* ainda vazio, PR #14). Aqui o SDK vem pronto:
+#   - zip publico da Belledonne (download.linphone.org) do MESMO commit do submodulo external/linphone-sdk,
+#     com SHA-256 conferido (scripts/sdk-precompilado.txt);
+#   - o wrapper C++ (liblinphone++), que o zip nao traz, e gerado do fonte do liblinphone no mesmo commit
+#     (GitHub da Belledonne) por cmake/sdk-precompilado;
+#   - o app compila com -DNEXUS_SDK_PRECOMPILADO=<sdk> (so o app; minutos em vez de horas).
+# Assinatura: igual ao instaladores-teste.yml, so com os secrets; sem eles sai "-nao-assinado".
+name: Instaladores (SDK pre-compilado)
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/instaladores-sdk-precompilado.yml'
+      - 'scripts/sdk-precompilado.*'
+      - 'cmake/sdk-precompilado/**'
+      - 'cmake/install/**'
+      - 'cmake/TasksMacos.cmake'
+      - 'CMakeLists.txt'
+  workflow_dispatch:
+    inputs:
+      ondafone:
+        description: 'Beta Ondafone: liga modo limitado/completo e conta (ENABLE_ONDAFONE_MODOS/CONTA)'
+        type: boolean
+        default: false
+
+concurrency:
+  # beta Ondafone e build padrão na mesma branch não se cancelam
+  group: instaladores-sdk-precompilado-${{ github.ref }}-${{ inputs.ondafone && 'ondafone' || 'padrao' }}
+  cancel-in-progress: true
+
+env:
+  QT_VERSION: '6.10.0'
+  BUILD_TYPE: Release
+  NEXUS_SOURCE_TAG: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || '' }}
+  NEXUS_CMAKE_OPTIONS: >-
+    -DENABLE_APP_PACKAGING=YES
+    -DENABLE_CRASH_HANDLER=NO
+    -DENABLE_UPDATE_CHECK=NO
+    ${{ inputs.ondafone && '-DENABLE_ONDAFONE_MODOS=ON -DENABLE_ONDAFONE_CONTA=ON' || '' }}
+
+jobs:
+  windows-instalador:
+    name: Windows (instalador .exe + .msi)
+    runs-on: windows-2022
+    timeout-minutes: 120
+    # Os secrets WINDOWS_CERT_* ficam só nos dois passos de assinatura (nunca no env do job: doxygen, pip, actions
+    # de terceiros e o build não os veem).
+    env:
+      WINDOWS_TIMESTAMP_URL: http://timestamp.digicert.com
+    steps:
+      - name: Caminhos longos (git e Windows)
+        run: |
+          git config --system core.longpaths true
+          New-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\FileSystem" -Name LongPathsEnabled -Value 1 -PropertyType DWORD -Force
+
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # git describe -> versao do app; sem submodulos
+
+      - uses: actions/setup-python@v5
+        id: py
+        with:
+          python-version: '3.12'
+
+      - name: Python (pystache, six) para o genwrapper.py
+        run: python -m pip install pystache six
+
+      - name: Doxygen 1.9.8 (XML da API C para o wrapper C++)
+        run: |
+          Invoke-WebRequest -Uri https://github.com/doxygen/doxygen/releases/download/Release_1_9_8/doxygen-1.9.8.windows.x64.bin.zip -OutFile $env:RUNNER_TEMP\doxygen.zip
+          $sha = (Get-FileHash -Algorithm SHA256 $env:RUNNER_TEMP\doxygen.zip).Hash.ToLower()
+          if ($sha -ne '03f98f585acee18df0575262feffccc8a93a5aeacd4ee8c21872aeef12532244') { throw "doxygen.zip com SHA-256 inesperado: $sha" }
+          Expand-Archive $env:RUNNER_TEMP\doxygen.zip -DestinationPath C:\doxygen
+          C:\doxygen\doxygen.exe --version
+
+      - name: WiX 3 (MSI pelo CPack)
+        shell: pwsh
+        run: |
+          if (-not ($env:WIX -and (Test-Path (Join-Path $env:WIX 'bin\candle.exe')))) {
+            choco install wixtoolset --version 3.14.1 -y --no-progress
+            $wix = Get-ChildItem 'C:\Program Files (x86)\WiX Toolset v3.*' | Sort-Object Name | Select-Object -Last 1 -ExpandProperty FullName
+            "WIX=$wix\" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+            $env:WIX = "$wix\"
+          }
+          if (-not (Test-Path (Join-Path $env:WIX 'bin\candle.exe'))) { throw "WiX 3 ausente" }
+
+      - name: SDK pre-compilado (zip conferido) + fonte do liblinphone no mesmo commit
+        shell: bash
+        run: bash scripts/sdk-precompilado.sh windows /d/sdk /d/lsdk
+
+      - name: Qt ${{ env.QT_VERSION }}
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: ${{ env.QT_VERSION }}
+          host: windows
+          target: desktop
+          arch: win64_msvc2022_64
+          modules: 'qtnetworkauth qtshadertools qt5compat qtquick3d qtmultimedia'
+          cache: true
+
+      - uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: liblinphone++ (wrapper C++) sobre o SDK
+        shell: pwsh
+        run: |
+          cmake -S cmake/sdk-precompilado -B D:\cxx -G Ninja `
+            "-DCMAKE_BUILD_TYPE=$env:BUILD_TYPE" -DCMAKE_C_COMPILER=cl -DCMAKE_CXX_COMPILER=cl `
+            "-DPython3_EXECUTABLE=${{ steps.py.outputs.python-path }}" `
+            -DDOXYGEN_EXECUTABLE=C:/doxygen/doxygen.exe `
+            -DLIBLINPHONE_SOURCE_DIR=D:/lsdk/liblinphone -DNEXUS_SDK_PRECOMPILADO=D:/sdk -DCMAKE_INSTALL_PREFIX=D:/sdk
+          if ($LASTEXITCODE -ne 0) { throw "configure do wrapper falhou" }
+          cmake --build D:\cxx --target install
+          if ($LASTEXITCODE -ne 0) { throw "build do wrapper falhou" }
+          Get-ChildItem D:\sdk\bin\liblinphone++.dll, D:\sdk\include\linphone++\linphone.hh, D:\sdk\share\LinphoneCxx\cmake\LinphoneCxxTargets.cmake
+
+      - name: Configurar, compilar e empacotar (so o app)
+        shell: pwsh
+        run: |
+          $opts = $env:NEXUS_CMAKE_OPTIONS -split '\s+' | Where-Object { $_ }
+          cmake -S . -B D:\b -G Ninja `
+            "-DCMAKE_BUILD_TYPE=$env:BUILD_TYPE" `
+            -DCMAKE_C_COMPILER=cl -DCMAKE_CXX_COMPILER=cl -DCMAKE_RC_COMPILER=rc `
+            "-DPython3_EXECUTABLE=${{ steps.py.outputs.python-path }}" `
+            -DNEXUS_SDK_PRECOMPILADO=D:/sdk `
+            -DENABLE_APP_MSI=YES `
+            "-DNEXUS_SOURCE_TAG=$env:NEXUS_SOURCE_TAG" `
+            @opts
+          if ($LASTEXITCODE -ne 0) { throw "configure falhou" }
+          cmake --build D:\b --target install --parallel 4
+          if ($LASTEXITCODE -ne 0) { throw "build falhou" }
+
+      - name: Certificado de assinatura configurado?
+        id: wincert
+        shell: pwsh
+        env:
+          WINDOWS_CERT_PFX: ${{ secrets.WINDOWS_CERT_PFX }}
+          WINDOWS_CERT_PASSWORD: ${{ secrets.WINDOWS_CERT_PASSWORD }}
+        run: |
+          $tem = [bool]$env:WINDOWS_CERT_PFX -and [bool]$env:WINDOWS_CERT_PASSWORD
+          "tem=$($tem.ToString().ToLower())" >> $env:GITHUB_OUTPUT
+
+      - name: Assinar instaladores .exe e .msi (so com secrets WINDOWS_CERT_*)
+        id: winsign
+        if: steps.wincert.outputs.tem == 'true'
+        shell: pwsh
+        env:
+          WINDOWS_CERT_PFX: ${{ secrets.WINDOWS_CERT_PFX }}
+          WINDOWS_CERT_PASSWORD: ${{ secrets.WINDOWS_CERT_PASSWORD }}
+        run: |
+          $pfx = Join-Path $env:RUNNER_TEMP 'nexus.pfx'
+          [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:WINDOWS_CERT_PFX))
+          $signtool = (Get-Command signtool.exe -ErrorAction SilentlyContinue).Source
+          if (-not $signtool) {
+            $signtool = Get-ChildItem 'C:\Program Files (x86)\Windows Kits\10\bin\*\x64\signtool.exe' |
+              Sort-Object FullName | Select-Object -Last 1 -ExpandProperty FullName
+          }
+          $pacotes = @(Get-ChildItem D:\b\OUTPUT\Packages\* -Include *.exe, *.msi | Select-Object -ExpandProperty FullName)
+          if ($pacotes.Count -ne 2) { throw "esperava 1 .exe + 1 .msi, veio: $pacotes" }
+          try {
+            foreach ($pacote in $pacotes) {
+              & $signtool sign /f $pfx /p $env:WINDOWS_CERT_PASSWORD /fd SHA256 /tr $env:WINDOWS_TIMESTAMP_URL /td SHA256 /d Nexus $pacote
+              if ($LASTEXITCODE -ne 0) { throw "signtool sign falhou: $pacote" }
+              & $signtool verify /pa /v $pacote | Select-Object -First 15
+              if ($LASTEXITCODE -ne 0) { throw "signtool verify falhou: $pacote" }
+            }
+          } finally { Remove-Item -Force $pfx -ErrorAction SilentlyContinue }
+
+      - name: Renomear instaladores (assinado / nao-assinado)
+        id: winname
+        shell: bash
+        run: |
+          if [ "${{ steps.winsign.outcome }}" = success ]; then st=assinado; else st=nao-assinado; fi
+          for ext in exe msi; do
+            src=$(ls /d/b/OUTPUT/Packages/*.$ext | head -1)
+            [ -n "$src" ] || { echo "::error::instalador .$ext nao gerado"; exit 1; }
+            mv "$src" "${src%.$ext}-$st.$ext"
+          done
+          echo "status=$st" >> "$GITHUB_OUTPUT"
+
+      - name: Conferir conteudo (DLLs do SDK no pacote)
+        if: always()
+        shell: bash
+        run: |
+          ls -la /d/b/OUTPUT/Packages || true
+          ls /d/b/OUTPUT/bin | head -100 || true
+          ls -R /d/b/OUTPUT/lib/mediastreamer /d/b/OUTPUT/share/belr 2>/dev/null | head -30 || true
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Nexus-windows-x64-instalador-${{ steps.winname.outputs.status }}${{ inputs.ondafone && '-ondafone' || '' }}
+          path: |
+            D:/b/OUTPUT/Packages/*.exe
+            D:/b/OUTPUT/Packages/*.msi
+          if-no-files-found: error
+          retention-days: 14
+
+  linux-appimage:
+    name: Linux (AppImage)
+    # Uma plataforma por vez: espera o Windows terminar (passando ou nao).
+    needs: windows-instalador
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-22.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Dependencias de sistema
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            ninja-build doxygen squashfs-tools file desktop-file-utils fuse libfuse2 \
+            libgl1-mesa-dev libegl1-mesa-dev libglew-dev libxkbcommon-dev libxkbcommon-x11-dev libfontconfig1-dev \
+            libfreetype6-dev libdbus-1-dev libxcb1-dev libx11-xcb-dev libxcb-cursor0 libxcb-keysyms1-dev \
+            libxcb-image0-dev libxcb-shm0-dev libxcb-icccm4-dev libxcb-sync-dev libxcb-xfixes0-dev libxcb-shape0-dev \
+            libxcb-randr0-dev libxcb-render-util0-dev libxcb-xinerama0-dev libxcb-xkb-dev libxcb-glx0-dev \
+            libx11-dev libxext-dev libxv1 libpulse0 libasound2 libv4l-0 libsasl2-2
+
+      - uses: actions/setup-python@v5
+        id: py
+        with:
+          python-version: '3.12'
+
+      - name: Python (pystache, six) para o genwrapper.py
+        run: python -m pip install pystache six
+
+      - name: SDK pre-compilado (bibliotecas do AppImage do mesmo commit, conferidas) + fonte e headers do mesmo commit
+        run: bash scripts/sdk-precompilado.sh linux "$RUNNER_TEMP/sdk" "$RUNNER_TEMP/lsdk"
+
+      - name: Qt ${{ env.QT_VERSION }}
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: ${{ env.QT_VERSION }}
+          host: linux
+          target: desktop
+          arch: linux_gcc_64
+          modules: 'qtnetworkauth qtshadertools qt5compat qtquick3d qtmultimedia'
+          cache: true
+
+      - name: liblinphone++ (wrapper C++) sobre o SDK
+        run: |
+          cmake -S cmake/sdk-precompilado -B build-cxx -G Ninja -DCMAKE_BUILD_TYPE=$BUILD_TYPE \
+            -DPython3_EXECUTABLE="${{ steps.py.outputs.python-path }}" \
+            -DLIBLINPHONE_SOURCE_DIR="$RUNNER_TEMP/lsdk/liblinphone" \
+            -DNEXUS_SDK_PRECOMPILADO="$RUNNER_TEMP/sdk" -DCMAKE_INSTALL_PREFIX="$RUNNER_TEMP/sdk"
+          cmake --build build-cxx --target install
+          ls -la "$RUNNER_TEMP/sdk/lib" | grep linphone
+
+      - name: Configurar, compilar e empacotar (so o app + AppImage)
+        env:
+          APPIMAGE_EXTRACT_AND_RUN: '1'
+        run: |
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=$BUILD_TYPE \
+            -DPython3_EXECUTABLE="${{ steps.py.outputs.python-path }}" \
+            -DNEXUS_SDK_PRECOMPILADO="$RUNNER_TEMP/sdk" \
+            -DNEXUS_SOURCE_TAG="$NEXUS_SOURCE_TAG" \
+            $NEXUS_CMAKE_OPTIONS
+          cmake --build build --target install --parallel 4
+
+      - name: "Teste: --fetch-config nao deixa o token no log"
+        run: tests/nexus/fetch-config-sem-token-no-log.sh "$(ls build/OUTPUT/Packages/*.AppImage | head -1)" 45
+
+      - name: Listar saida
+        if: always()
+        run: |
+          ls -la build/OUTPUT/Packages || true
+          ls build/OUTPUT/lib | head -80 || true
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Nexus-linux-x86_64-AppImage${{ inputs.ondafone && '-ondafone' || '' }}
+          path: build/OUTPUT/Packages/*.AppImage
+          if-no-files-found: error
+          retention-days: 14
+
+  macos-dmg:
+    # So arm64 (Apple Silicon): o zip pre-compilado do macOS da Belledonne nao traz x86_64.
+    # Sem secrets APPLE_* no repositorio: .app com assinatura ad-hoc (o Gatekeeper avisa; ver INSTALAR.md).
+    name: macOS arm64 (.dmg)
+    needs: linux-appimage
+    if: ${{ !cancelled() }}
+    runs-on: macos-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Dependencias (Homebrew)
+        run: |
+          brew install ninja doxygen || brew install ninja doxygen
+          xcodebuild -version
+          doxygen --version
+
+      - uses: actions/setup-python@v5
+        id: py
+        with:
+          python-version: '3.12'
+
+      - name: Python (pystache, six) para o genwrapper.py
+        run: python -m pip install pystache six
+
+      - name: SDK pre-compilado (zip conferido) + fonte do mesmo commit
+        run: bash scripts/sdk-precompilado.sh macos "$RUNNER_TEMP/sdk" "$RUNNER_TEMP/lsdk"
+
+      - name: Qt ${{ env.QT_VERSION }}
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: ${{ env.QT_VERSION }}
+          host: mac
+          target: desktop
+          arch: clang_64
+          modules: 'qtnetworkauth qtshadertools qt5compat qtquick3d qtmultimedia'
+          cache: true
+
+      - name: liblinphone++ (wrapper C++) sobre o SDK
+        run: |
+          cmake -S cmake/sdk-precompilado -B build-cxx -G Ninja -DCMAKE_BUILD_TYPE=$BUILD_TYPE \
+            -DCMAKE_OSX_ARCHITECTURES=arm64 -DCMAKE_OSX_DEPLOYMENT_TARGET=12.3 \
+            -DPython3_EXECUTABLE="${{ steps.py.outputs.python-path }}" \
+            -DLIBLINPHONE_SOURCE_DIR="$RUNNER_TEMP/lsdk/liblinphone" \
+            -DNEXUS_SDK_PRECOMPILADO="$RUNNER_TEMP/sdk" -DCMAKE_INSTALL_PREFIX="$RUNNER_TEMP/sdk"
+          cmake --build build-cxx --target install
+          ls -la "$RUNNER_TEMP/sdk/lib"
+
+      - name: Configurar, compilar e empacotar (so o app + .dmg)
+        run: |
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=$BUILD_TYPE \
+            -DPython3_EXECUTABLE="${{ steps.py.outputs.python-path }}" \
+            -DLINPHONEAPP_MACOS_ARCHS=arm64 \
+            -DNEXUS_SDK_PRECOMPILADO="$RUNNER_TEMP/sdk" \
+            -DNEXUS_SOURCE_TAG="$NEXUS_SOURCE_TAG" \
+            $NEXUS_CMAKE_OPTIONS
+          cmake --build build --target install --parallel $(sysctl -n hw.ncpu)
+
+      - name: Renomear .dmg (arm64, nao-assinado)
+        run: |
+          ls -la build/OUTPUT/macos/Packages || true
+          src=$(ls build/OUTPUT/macos/Packages/*.dmg | head -1)
+          [ -n "$src" ] || { echo "::error::.dmg nao gerado"; exit 1; }
+          mv "$src" "${src%-mac.dmg}-mac-arm64-nao-assinado.dmg"
+          lipo -archs build/OUTPUT/macos/Nexus.app/Contents/MacOS/nexus || true
+          ls build/OUTPUT/macos/Nexus.app/Contents/Frameworks | head -60 || true
+          otool -L build/OUTPUT/macos/Nexus.app/Contents/MacOS/nexus | head -30 || true
+
+      - name: "Teste: o app abre (dyld carrega o SDK) e --fetch-config nao deixa o token no log"
+        # Informativo: o teste foi escrito para o Linux (logs em ~/.local); no macOS pode sair INCONCLUSIVO.
+        continue-on-error: true
+        run: |
+          brew install coreutils >/dev/null 2>&1 || true
+          export PATH="$(brew --prefix coreutils)/libexec/gnubin:$PATH"
+          tests/nexus/fetch-config-sem-token-no-log.sh build/OUTPUT/macos/Nexus.app/Contents/MacOS/nexus 45
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Nexus-macos-arm64-dmg-nao-assinado${{ inputs.ondafone && '-ondafone' || '' }}
+          path: build/OUTPUT/macos/Packages/*.dmg
+          if-no-files-found: error
+          retention-days: 14

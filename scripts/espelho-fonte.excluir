@@ -1,0 +1,13 @@
+# Caminhos (relativos à raiz da tag) que NÃO vão para o espelho público. Um por linha; diretório termina em /.
+docs/NEXUS-DESKTOP.md
+INSTALAR.md
+.github/
+docs/release-gpl.md
+docs/learnings/
+.claude/
+FILA-CODE-*
+**/*.pfx
+**/*.p12
+**/*.pem
+**/*.key
+**/.env*

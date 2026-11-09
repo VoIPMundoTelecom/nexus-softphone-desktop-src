@@ -1,0 +1,69 @@
+# Nexus: confere o espelho GPL (scripts/espelho-fonte.sh --teste) a cada mudança no script, nas listas ou no
+# NOTICE/TRADEMARKS. Sem --com-submodulos (o fonte dos submódulos depende do espelho lp-* / gitlab) e sem build
+# (o SDK compilado não cabe aqui); confere que os caminhos internos não vão para o espelho e que o gitleaks passa.
+name: Espelho GPL (teste)
+
+on:
+  pull_request:
+    paths:
+      - 'scripts/espelho-fonte*'
+      - 'scripts/ci-submodulos.sh'
+      - '.github/workflows/instaladores-teste.yml'
+      - 'NOTICE.md'
+      - 'TRADEMARKS.md'
+      - 'README.md'
+      - '.github/workflows/espelho-teste.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  espelho:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: gitleaks
+        env:
+          # sha256 de gitleaks_8.30.1_linux_x64.tar.gz (gitleaks_8.30.1_checksums.txt do release)
+          GITLEAKS_SHA256: 551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb
+        run: |
+          curl -sSfL -o "$RUNNER_TEMP/gitleaks.tar.gz" \
+            https://github.com/gitleaks/gitleaks/releases/download/v8.30.1/gitleaks_8.30.1_linux_x64.tar.gz
+          echo "$GITLEAKS_SHA256  $RUNNER_TEMP/gitleaks.tar.gz" | sha256sum -c -
+          sudo tar -xzf "$RUNNER_TEMP/gitleaks.tar.gz" -C /usr/local/bin gitleaks
+          gitleaks version
+
+      - name: Gerar o espelho (--teste)
+        run: |
+          git tag espelho-ci HEAD
+          scripts/espelho-fonte.sh --teste espelho-ci "$RUNNER_TEMP/espelho"
+          R="$RUNNER_TEMP/espelho/espelho-ci-TESTE-NAO-PUBLICAR/repo"
+          for f in .github docs/NEXUS-DESKTOP.md docs/release-gpl.md docs/learnings INSTALAR.md; do
+            test ! -e "$R/$f" || { echo "::error::$f foi para o espelho"; exit 1; }
+          done
+          test -f "$R/SUBMODULOS.md" && test -f "$R/BUILD-NEXUS.md"
+          ! grep -q '@[A-Z_]*@' "$R/NOTICE.md"
+          gitleaks dir --no-banner "$R"
+
+      - name: Fonte do release (--sem-terceiros, o que o job fonte-gpl anexa à tag)
+        run: |
+          scripts/espelho-fonte.sh --sem-terceiros espelho-ci "$RUNNER_TEMP/espelho-release"
+          d="$RUNNER_TEMP/espelho-release/espelho-ci"
+          (cd "$d" && sha256sum -c SHA256SUMS)
+          tar -tzf "$d/nexus-softphone-desktop-src-espelho-ci.tar.gz" > "$RUNNER_TEMP/lista.txt"
+          if grep -E '^[^/]+/(\.github/|INSTALAR\.md$|docs/NEXUS-DESKTOP\.md$|docs/release-gpl\.md$|docs/learnings/)' "$RUNNER_TEMP/lista.txt"; then
+            echo "::error::arquivo interno no fonte do release"; exit 1
+          fi
+
+      - name: Saída parcial é apagada quando o script falha
+        run: |
+          # --com-submodulos sem os objetos dos submódulos sai com exit 1 depois de criar a pasta
+          if scripts/espelho-fonte.sh --teste --com-submodulos espelho-ci "$RUNNER_TEMP/neg"; then
+            echo "::error::devia falhar sem os submódulos"; exit 1
+          fi
+          test -z "$(ls -A "$RUNNER_TEMP/neg")"

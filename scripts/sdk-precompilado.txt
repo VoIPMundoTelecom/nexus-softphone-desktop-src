@@ -1,0 +1,12 @@
+# Nexus: linphone-sdk PRE-COMPILADO publicado pela Belledonne, um por commit do submodulo external/linphone-sdk.
+# scripts/sdk-precompilado.sh so aceita a linha cujo commit e o do submodulo; se o submodulo mudar sem
+# atualizar esta lista, o CI para (nao usa SDK de outra versao).
+# Para um commit novo: procure em https://download.linphone.org/releases/{windows,macosx}/sdk/ o zip com
+# "+<10 primeiros do commit>" no nome, baixe, confira e anote o SHA-256.
+#
+# commit-do-submodulo                       plataforma  url                                                                                                sha256
+9168d5041bc6817bb6c4bccf2993c79de8d4a28c   windows     https://download.linphone.org/releases/windows/sdk/linphone-sdk-win64-5.5.30-pre.1%2B9168d5041b.zip   1b9c6e3ad40221cda651629b8fd9d73018adebba1283ba8406d1482294faa211
+9168d5041bc6817bb6c4bccf2993c79de8d4a28c   macos       https://download.linphone.org/releases/macosx/sdk/linphone-sdk-macos-5.5.30-pre.1%2B9168d5041b.zip    731b3db57fd178d8fd4b9df60ec131756a0fabfe93159eb601bdf5bf9edbcc08
+# Linux: AppImage de snapshot do Linphone desktop 6.2.3-13-g2d2a35c9e (upstream), compilado com o linphone-sdk 9168d504
+# (o liblinphone.so traz "5.5.29-1-g9168d5041b"; o script confere).
+9168d5041bc6817bb6c4bccf2993c79de8d4a28c   linux       https://download.linphone.org/snapshots/linux/app/Linphone-6.2.3-13-g2d2a35c9e-x86_64.AppImage        e8ba3174a259d9b6468840844665d574287474513453fcde2293a7628a238350

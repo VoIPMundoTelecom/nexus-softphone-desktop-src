@@ -1,0 +1,40 @@
+# Nexus: confere que o commit fixado de cada submódulo (recursivo: linphone-sdk e os externos dele) existe no
+# espelho VoIPMundoTelecom/lp-* (scripts/espelhar-deps.sh). Falha listando o que falta: rodar o espelhar-deps.sh
+# numa máquina com o gitlab.linphone.org no ar (docs/learnings/desktop-espelho-deps.md).
+name: Espelho das dependências
+
+on:
+  pull_request:
+    paths:
+      - '.gitmodules'
+      - 'external/**'
+      - 'scripts/espelhar-deps.sh'
+      - 'scripts/ci-submodulos.sh'
+      - '.github/workflows/espelho-deps.yml'
+  push:
+    branches: [main]
+    paths:
+      - '.gitmodules'
+      - 'external/**'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  conferir:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Commits fixados no espelho lp-*
+        env:
+          # token so de leitura nos repos lp-* (privados)
+          LP_MIRROR_TOKEN: ${{ secrets.LP_MIRROR_TOKEN }}
+        run: |
+          [ -n "$LP_MIRROR_TOKEN" ] || { echo "::error::secret LP_MIRROR_TOKEN ausente"; exit 1; }
+          echo "::add-mask::$LP_MIRROR_TOKEN"
+          git config --global url."https://x-access-token:${LP_MIRROR_TOKEN}@github.com/VoIPMundoTelecom/lp-".insteadOf \
+            "https://github.com/VoIPMundoTelecom/lp-"
+          scripts/espelhar-deps.sh --conferir --trabalho "$RUNNER_TEMP/conferir"

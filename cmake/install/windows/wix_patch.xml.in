@@ -1,0 +1,45 @@
+<!--
+  Nexus: registros do MSI (CPack WiX), os mesmos do instalador NSIS (install.nsi.in).
+  Gerado por cmake/install/install.cmake (ENABLE_APP_MSI), que monta um bloco por esquema de URL.
+  Esquemas genericos (sip, sips, tel, callto): chave HKCR permanente e sem sobrescrever (NexusEsquema_*); a
+  associacao do Nexus (ProgID + URLAssociations) sai na desinstalacao, como no uninstall.nsi.in.
+-->
+<CPackWiXPatch>
+	<CPackWiXFragment Id="#PRODUCT">
+		<!-- Nexus instalado pelo .exe (NSIS, chave Uninstall\@CPACK_PACKAGE_INSTALL_REGISTRY_KEY@): os dois no mesmo
+		     Program Files se sobrescrevem e a desinstalacao de um quebra o outro. -->
+		<Property Id="NEXUS_NSIS_HKLM64">
+			<RegistrySearch Id="NexusNsisHklm64" Root="HKLM" Key="Software\Microsoft\Windows\CurrentVersion\Uninstall\@CPACK_PACKAGE_INSTALL_REGISTRY_KEY@" Name="UninstallString" Type="raw" Win64="yes"/>
+		</Property>
+		<Property Id="NEXUS_NSIS_HKLM32">
+			<RegistrySearch Id="NexusNsisHklm32" Root="HKLM" Key="Software\Microsoft\Windows\CurrentVersion\Uninstall\@CPACK_PACKAGE_INSTALL_REGISTRY_KEY@" Name="UninstallString" Type="raw" Win64="no"/>
+		</Property>
+		<Property Id="NEXUS_NSIS_HKCU">
+			<RegistrySearch Id="NexusNsisHkcu" Root="HKCU" Key="Software\Microsoft\Windows\CurrentVersion\Uninstall\@CPACK_PACKAGE_INSTALL_REGISTRY_KEY@" Name="UninstallString" Type="raw"/>
+		</Property>
+		<Condition Message="O @APPLICATION_NAME@ ja esta instalado pelo instalador .exe. Desinstale-o em Configuracoes &gt; Aplicativos antes de instalar o .msi. / @APPLICATION_NAME@ is already installed with the .exe installer: uninstall it first.">
+			<![CDATA[Installed OR NOT (NEXUS_NSIS_HKLM64 OR NEXUS_NSIS_HKLM32 OR NEXUS_NSIS_HKCU)]]>
+		</Condition>
+		<DirectoryRef Id="INSTALL_ROOT">
+@NEXUS_WIX_GENERICOS@
+			<Component Id="NexusRegistro" Guid="@NEXUS_WIX_REGISTRO_GUID@">
+				<RegistryValue Root="HKLM" Key="SOFTWARE\@APPLICATION_VENDOR@\@APPLICATION_NAME@" Name="InstallDir" Type="string" Value="[INSTALL_ROOT]" KeyPath="yes"/>
+				<RegistryKey Root="HKLM" Key="SOFTWARE\@APPLICATION_VENDOR@\@APPLICATION_NAME@\Capabilities">
+					<RegistryValue Name="ApplicationDescription" Type="string" Value="@APPLICATION_DESCRIPTION@"/>
+					<RegistryValue Name="ApplicationName" Type="string" Value="@APPLICATION_NAME@"/>
+					<RegistryValue Name="FriendlyAppName" Type="string" Value="@APPLICATION_NAME@"/>
+				</RegistryKey>
+				<RegistryValue Root="HKLM" Key="SOFTWARE\RegisteredApplications" Name="@APPLICATION_NAME@" Type="string" Value="SOFTWARE\@APPLICATION_VENDOR@\@APPLICATION_NAME@\Capabilities"/>
+				<RegistryKey Root="HKLM" Key="SOFTWARE\IM Providers\@APPLICATION_NAME@">
+					<RegistryValue Name="ProcessName" Type="string" Value="@EXECUTABLE_NAME@.exe"/>
+					<RegistryValue Name="FriendlyName" Type="string" Value="@APPLICATION_NAME@"/>
+				</RegistryKey>
+@NEXUS_WIX_PROTOCOLOS@
+			</Component>
+		</DirectoryRef>
+	</CPackWiXFragment>
+	<CPackWiXFragment Id="#PRODUCTFEATURE">
+		<ComponentRef Id="NexusRegistro"/>
+@NEXUS_WIX_GENERICOS_REFS@
+	</CPackWiXFragment>
+</CPackWiXPatch>
